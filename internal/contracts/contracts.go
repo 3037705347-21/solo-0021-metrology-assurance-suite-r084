@@ -31,12 +31,28 @@ type SealCaseRequest struct {
 	Summary  string `json:"summary"`
 }
 
+// ConfirmDeviceCommissioningRequest is the site confirmation submitted before a
+// device may enter formal verification work.
+type ConfirmDeviceCommissioningRequest struct {
+	ResponsibleParty string `json:"responsible_party"`
+	InstallLocation  string `json:"install_location"`
+	FoundationState  string `json:"foundation_state"`
+	Basis            string `json:"basis"`
+	ConfirmedBy      string `json:"confirmed_by"`
+}
+
 type DeviceResponse struct {
-	Device domain.Device `json:"device"`
+	Device        domain.Device                      `json:"device"`
+	Confirmations []domain.CommissioningConfirmation `json:"confirmations"`
+}
+
+type ConfirmationsResponse struct {
+	Confirmations []domain.CommissioningConfirmation `json:"confirmations"`
 }
 
 type CaseResponse struct {
 	Case         domain.VerificationCase `json:"case"`
+	Device       domain.Device           `json:"device"`
 	Measurements []domain.Measurement    `json:"measurements"`
 	Seal         *domain.EvidenceSeal    `json:"seal,omitempty"`
 	Events       []domain.AuditEvent     `json:"events"`

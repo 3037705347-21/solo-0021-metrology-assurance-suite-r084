@@ -51,7 +51,7 @@ func (s *Service) RegisterDevice(ctx context.Context, input contracts.RegisterDe
 			"",
 			"device_enrolled",
 			item.Steward,
-			"device enrolled for assurance work",
+			"device enrolled and awaiting commissioning confirmation",
 			s.now(),
 		)
 		if err != nil {
@@ -64,17 +64,92 @@ func (s *Service) RegisterDevice(ctx context.Context, input contracts.RegisterDe
 	return created, err
 }
 
-func (s *Service) Device(ctx context.Context, id string) (domain.Device, error) {
-	var found domain.Device
+func (s *Service) Device(ctx context.Context, id string) (contracts.DeviceResponse, error) {
+	var result contracts.DeviceResponse
 	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
 		item, exists := snapshot.Device(strings.TrimSpace(id))
 		if !exists {
 			return fmt.Errorf("%w: device %s", domain.ErrNotFound, id)
 		}
-		found = item
+		result = deviceResponseFromSnapshot(snapshot, item)
 		return nil
 	})
-	return found, err
+	return result, err
+}
+
+// ConfirmDeviceCommissioning records the site confirmation (responsible party,
+// install location, foundation state, and evidence basis) and, in the same
+// atomic commit, moves a pending device to active service. Any failure (bad
+// input, missing/already-commissioned device) aborts the commit, so neither the
+// device fact nor its confirmation history is rewritten.
+func (s *Service) ConfirmDeviceCommissioning(ctx context.Context, deviceID string, input contracts.ConfirmDeviceCommissioningRequest) (contracts.DeviceResponse, error) {
+	var result contracts.DeviceResponse
+	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		id := strings.TrimSpace(deviceID)
+		device, exists := m.Device(id)
+		if !exists {
+			return fmt.Errorf("%w: device %s", domain.ErrNotFound, id)
+		}
+		confirmation, err := domain.NewCommissioningConfirmation(
+			m.NextID("confirmation"),
+			device.ID,
+			input.ResponsibleParty,
+			input.InstallLocation,
+			input.FoundationState,
+			input.Basis,
+			input.ConfirmedBy,
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		// Commission first: a repeat or invalid-state confirmation fails before
+		// any history is appended, so a rejected attempt cannot rewrite facts.
+		if err := device.Commission(s.now()); err != nil {
+			return err
+		}
+		if err := m.AppendConfirmation(confirmation); err != nil {
+			return err
+		}
+		if err := m.UpdateDevice(device); err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"device",
+			device.ID,
+			"",
+			"device_commissioned",
+			confirmation.ConfirmedBy,
+			fmt.Sprintf("device commissioned by %s at %s; foundation %s; basis %s",
+				confirmation.ResponsibleParty,
+				confirmation.InstallLocation,
+				confirmation.FoundationState,
+				confirmation.Basis,
+			),
+			s.now(),
+		)
+		if err != nil {
+			return err
+		}
+		m.AppendEvent(event)
+		result = deviceResponse(device, m.Confirmations(device.ID))
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) DeviceConfirmations(ctx context.Context, deviceID string) (contracts.ConfirmationsResponse, error) {
+	var result contracts.ConfirmationsResponse
+	err := s.repository.Read(ctx, func(snapshot repository.Snapshot) error {
+		id := strings.TrimSpace(deviceID)
+		if _, exists := snapshot.Device(id); !exists {
+			return fmt.Errorf("%w: device %s", domain.ErrNotFound, id)
+		}
+		result.Confirmations = snapshot.Confirmations(id)
+		return nil
+	})
+	return result, err
 }
 
 func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest) (contracts.CaseResponse, error) {
@@ -86,6 +161,9 @@ func (s *Service) OpenCase(ctx context.Context, input contracts.OpenCaseRequest)
 			return fmt.Errorf("%w: device %s", domain.ErrNotFound, deviceID)
 		}
 		if !device.IsActive() {
+			if !device.IsCommissioned() {
+				return fmt.Errorf("%w: device %s is %s", domain.ErrDeviceNotCommissioned, device.ID, device.Status)
+			}
 			return fmt.Errorf("%w: device %s is %s", domain.ErrStateConflict, device.ID, device.Status)
 		}
 		if active, exists := m.ActiveCaseForDevice(device.ID); exists {
@@ -309,6 +387,11 @@ func caseResponse(m *repository.Mutation, item domain.VerificationCase) contract
 		Measurements: m.Measurements(item.ID),
 		Events:       m.Events(item.ID),
 	}
+	// The case view carries the same device lifecycle fact used by commissioning
+	// and later retirement, so readers never infer state from case data alone.
+	if device, exists := m.Device(item.DeviceID); exists {
+		result.Device = device
+	}
 	if seal, exists := m.Seal(item.ID); exists {
 		result.Seal = &seal
 	}
@@ -321,8 +404,25 @@ func caseResponseFromSnapshot(snapshot repository.Snapshot, item domain.Verifica
 		Measurements: snapshot.Measurements(item.ID),
 		Events:       snapshot.Events(item.ID),
 	}
+	if device, exists := snapshot.Device(item.DeviceID); exists {
+		result.Device = device
+	}
 	if seal, exists := snapshot.Seal(item.ID); exists {
 		result.Seal = &seal
 	}
 	return result
+}
+
+func deviceResponse(item domain.Device, confirmations []domain.CommissioningConfirmation) contracts.DeviceResponse {
+	return contracts.DeviceResponse{
+		Device:        item,
+		Confirmations: confirmations,
+	}
+}
+
+func deviceResponseFromSnapshot(snapshot repository.Snapshot, item domain.Device) contracts.DeviceResponse {
+	return contracts.DeviceResponse{
+		Device:        item,
+		Confirmations: snapshot.Confirmations(item.ID),
+	}
 }

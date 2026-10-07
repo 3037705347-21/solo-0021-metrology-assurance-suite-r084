@@ -36,6 +36,7 @@ func main() {
 
 	checks := map[string]func() error{
 		"register-device":          checkRegisterDevice,
+		"commission-device":        checkCommissionDevice,
 		"open-verification-case":   checkOpenVerificationCase,
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
@@ -112,12 +113,307 @@ func checkRegisterDevice() error {
 	return expectErrorCode(duplicate, "duplicate_asset_tag")
 }
 
+func checkCommissionDevice() error {
+	h := newHarness()
+	defer h.close()
+
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+
+	// A freshly registered device is pending and must not yet be able to open a case.
+	pending, err := h.request(http.MethodGet, "/devices/"+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(pending, http.StatusOK); err != nil {
+		return err
+	}
+	pendingStatus, err := nestedString(pending.Body, "device", "status")
+	if err != nil {
+		return err
+	}
+	if pendingStatus != "pending_commissioning" {
+		return fmt.Errorf("new device status = %q, expected pending_commissioning", pendingStatus)
+	}
+	if _, err := nestedString(pending.Body, "device", "commissioned_at"); err == nil {
+		return errors.New("pending device already carries a commissioned_at timestamp")
+	}
+	pendingConfirmations, err := nestedSlice(pending.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(pendingConfirmations) != 0 {
+		return fmt.Errorf("pending device already has %d confirmations", len(pendingConfirmations))
+	}
+
+	blocked, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": deviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "device_not_commissioned"); err != nil {
+		return err
+	}
+
+	// A malformed confirmation fails validation and must not change device facts.
+	invalid, err := h.request(http.MethodPost, "/devices/"+deviceID+"/confirmations", map[string]any{
+		"responsible_party": "Lin",
+		"install_location":  "Bench 3, Room A",
+		"foundation_state":  "",
+		"basis":             "site checklist #42",
+		"confirmed_by":      "Sora",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(invalid, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(invalid, "invalid_input"); err != nil {
+		return err
+	}
+	afterInvalid, err := h.request(http.MethodGet, "/devices/"+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(afterInvalid, http.StatusOK); err != nil {
+		return err
+	}
+	statusAfterInvalid, err := nestedString(afterInvalid.Body, "device", "status")
+	if err != nil {
+		return err
+	}
+	if statusAfterInvalid != "pending_commissioning" {
+		return fmt.Errorf("failed confirmation rewrote device status to %q", statusAfterInvalid)
+	}
+	historyAfterInvalid, err := nestedSlice(afterInvalid.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(historyAfterInvalid) != 0 {
+		return fmt.Errorf("failed confirmation appended %d history records", len(historyAfterInvalid))
+	}
+
+	// A valid confirmation enables the device in the same atomic commit.
+	confirmed, err := h.commissionDevice(deviceID, map[string]any{
+		"responsible_party": "Lin",
+		"install_location":  "Bench 3, Room A",
+		"foundation_state":  "leveled and bolted down",
+		"basis":             "site checklist #42 and install report",
+		"confirmed_by":      "Sora",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(confirmed, http.StatusCreated); err != nil {
+		return err
+	}
+	activeStatus, err := nestedString(confirmed.Body, "device", "status")
+	if err != nil {
+		return err
+	}
+	if activeStatus != "active" {
+		return fmt.Errorf("confirmed device status = %q, expected active", activeStatus)
+	}
+	commissionedAt, err := nestedString(confirmed.Body, "device", "commissioned_at")
+	if err != nil {
+		return err
+	}
+	if commissionedAt == "" {
+		return errors.New("commissioned device is missing commissioned_at")
+	}
+	confirmations, err := nestedSlice(confirmed.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(confirmations) != 1 {
+		return fmt.Errorf("device view has %d confirmations after success", len(confirmations))
+	}
+	first, ok := confirmations[0].(map[string]any)
+	if !ok {
+		return errors.New("confirmation entry is not an object")
+	}
+	if first["responsible_party"] != "Lin" || first["install_location"] != "Bench 3, Room A" ||
+		first["foundation_state"] != "leveled and bolted down" || first["confirmed_by"] != "Sora" {
+		return fmt.Errorf("confirmation record does not preserve submitted facts: %v", first)
+	}
+
+	// Once enabled, a case can open; the case view carries the same lifecycle fact.
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseDeviceStatus, err := nestedString(opened.Body, "device", "status")
+	if err != nil {
+		return err
+	}
+	if caseDeviceStatus != "active" {
+		return fmt.Errorf("case view device status = %q, expected active", caseDeviceStatus)
+	}
+
+	// Two confirmations racing a fresh pending device must enable it exactly once.
+	raceID, err := h.createDevice("MET-1502")
+	if err != nil {
+		return err
+	}
+	type raceOutcome struct {
+		response apiResponse
+		err      error
+	}
+	raceResults := make(chan raceOutcome, 2)
+	var raceWait sync.WaitGroup
+	for index := 0; index < 2; index++ {
+		raceWait.Add(1)
+		go func(index int) {
+			defer raceWait.Done()
+			response, err := h.commissionDevice(raceID, map[string]any{
+				"responsible_party": fmt.Sprintf("Party-%d", index+1),
+				"install_location":  "Bench 4, Room A",
+				"foundation_state":  "leveled",
+				"basis":             fmt.Sprintf("checklist-%d", index+1),
+				"confirmed_by":      "Sora",
+			})
+			raceResults <- raceOutcome{response: response, err: err}
+		}(index)
+	}
+	raceWait.Wait()
+	close(raceResults)
+	raceCreated := 0
+	raceConflict := 0
+	for item := range raceResults {
+		if item.err != nil {
+			return item.err
+		}
+		switch item.response.Status {
+		case http.StatusCreated:
+			raceCreated++
+		case http.StatusConflict:
+			raceConflict++
+		default:
+			return fmt.Errorf("unexpected concurrent confirmation status %d: %s", item.response.Status, item.response.Raw)
+		}
+	}
+	if raceCreated != 1 || raceConflict != 1 {
+		return fmt.Errorf("concurrent confirmation outcomes: %d created, %d conflict", raceCreated, raceConflict)
+	}
+	raceHistory, err := h.request(http.MethodGet, "/devices/"+raceID+"/confirmations", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(raceHistory, http.StatusOK); err != nil {
+		return err
+	}
+	raceItems, err := nestedSlice(raceHistory.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(raceItems) != 1 {
+		return fmt.Errorf("racing confirmations left %d records, expected 1", len(raceItems))
+	}
+
+	// A repeat confirmation is rejected and must not rewrite history or the timestamp.
+	duplicate, err := h.commissionDevice(deviceID, map[string]any{
+		"responsible_party": "Someone Else",
+		"install_location":  "Other Bench",
+		"foundation_state":  "unchecked",
+		"basis":             "duplicate submission",
+		"confirmed_by":      "Other",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(duplicate, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(duplicate, "device_already_commissioned"); err != nil {
+		return err
+	}
+
+	history, err := h.request(http.MethodGet, "/devices/"+deviceID+"/confirmations", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(history, http.StatusOK); err != nil {
+		return err
+	}
+	items, err := nestedSlice(history.Body, "confirmations")
+	if err != nil {
+		return err
+	}
+	if len(items) != 1 {
+		return fmt.Errorf("repeat confirmation rewrote history to %d records", len(items))
+	}
+	survivor, ok := items[0].(map[string]any)
+	if !ok {
+		return errors.New("surviving confirmation is not an object")
+	}
+	if survivor["responsible_party"] != "Lin" || survivor["confirmed_by"] != "Sora" {
+		return fmt.Errorf("repeat confirmation rewrote the device facts: %v", survivor)
+	}
+
+	final, err := h.request(http.MethodGet, "/devices/"+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	finalCommissionedAt, err := nestedString(final.Body, "device", "commissioned_at")
+	if err != nil {
+		return err
+	}
+	if finalCommissionedAt != commissionedAt {
+		return fmt.Errorf("commissioned_at changed from %q to %q", commissionedAt, finalCommissionedAt)
+	}
+
+	// Confirming a missing device is a stable not-found.
+	missing, err := h.commissionDevice("device-9999", map[string]any{
+		"responsible_party": "Lin",
+		"install_location":  "Bench 3",
+		"foundation_state":  "ok",
+		"basis":             "checklist",
+		"confirmed_by":      "Sora",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(missing, http.StatusNotFound); err != nil {
+		return err
+	}
+	return expectErrorCode(missing, "not_found")
+}
+
 func checkOpenVerificationCase() error {
 	h := newHarness()
 	defer h.close()
 
 	deviceID, err := h.createDevice("MET-1101")
 	if err != nil {
+		return err
+	}
+	blocked, err := h.request(http.MethodPost, "/cases", map[string]any{
+		"device_id": deviceID,
+		"nominal":   25.0,
+		"tolerance": 0.5,
+		"steward":   "Qiao",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(blocked, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(blocked, "device_not_commissioned"); err != nil {
+		return err
+	}
+
+	if _, err := h.commissionDevice(deviceID, defaultCommissionBody()); err != nil {
 		return err
 	}
 	opened, err := h.openCase(deviceID)
@@ -167,6 +463,9 @@ func checkRecordMeasurement() error {
 	if err != nil {
 		return err
 	}
+	if _, err := h.commissionDevice(deviceID, defaultCommissionBody()); err != nil {
+		return err
+	}
 	opened, err := h.openCase(deviceID)
 	if err != nil {
 		return err
@@ -210,6 +509,9 @@ func checkRecordMeasurement() error {
 
 	rejectDeviceID, err := h.createDevice("MET-1202")
 	if err != nil {
+		return err
+	}
+	if _, err := h.commissionDevice(rejectDeviceID, defaultCommissionBody()); err != nil {
 		return err
 	}
 	rejectCase, err := h.openCase(rejectDeviceID)
@@ -440,6 +742,22 @@ func (h *harness) createDevice(tag string) (string, error) {
 	return nestedString(response.Body, "device", "id")
 }
 
+func defaultCommissionBody() map[string]any {
+	return map[string]any{
+		"responsible_party": "Lin",
+		"install_location":  "Bench 1, Room A",
+		"foundation_state":  "leveled and bolted down",
+		"basis":             "site checklist #7",
+		"confirmed_by":      "Sora",
+	}
+}
+
+// commissionDevice submits a commissioning confirmation and returns the raw
+// response so callers can assert on both success and failure outcomes.
+func (h *harness) commissionDevice(deviceID string, body map[string]any) (apiResponse, error) {
+	return h.request(http.MethodPost, "/devices/"+deviceID+"/confirmations", body)
+}
+
 func (h *harness) openCase(deviceID string) (apiResponse, error) {
 	response, err := h.request(http.MethodPost, "/cases", map[string]any{
 		"device_id": deviceID,
@@ -468,6 +786,9 @@ func (h *harness) rejectedCase(tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if _, err := h.commissionDevice(deviceID, defaultCommissionBody()); err != nil {
+		return "", err
+	}
 	opened, err := h.openCase(deviceID)
 	if err != nil {
 		return "", err
@@ -489,6 +810,9 @@ func (h *harness) rejectedCase(tag string) (string, error) {
 func (h *harness) readyCase(tag string) (string, error) {
 	deviceID, err := h.createDevice(tag)
 	if err != nil {
+		return "", err
+	}
+	if _, err := h.commissionDevice(deviceID, defaultCommissionBody()); err != nil {
 		return "", err
 	}
 	opened, err := h.openCase(deviceID)

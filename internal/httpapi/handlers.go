@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"example.com/solo-0021-metrology-assurance-suite/internal/contracts"
+	"example.com/solo-0021-metrology-assurance-suite/internal/domain"
 )
 
 func (s *Server) health(writer http.ResponseWriter, _ *http.Request) {
@@ -21,16 +22,45 @@ func (s *Server) registerDevice(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusCreated, contracts.DeviceResponse{Device: device})
+	writeJSON(writer, http.StatusCreated, contracts.DeviceResponse{Device: device, Confirmations: []domain.CommissioningConfirmation{}})
 }
 
 func (s *Server) device(writer http.ResponseWriter, request *http.Request) {
-	device, err := s.service.Device(request.Context(), request.PathValue("id"))
+	view, err := s.service.Device(request.Context(), request.PathValue("id"))
 	if err != nil {
 		writeError(writer, err)
 		return
 	}
-	writeJSON(writer, http.StatusOK, contracts.DeviceResponse{Device: device})
+	if view.Confirmations == nil {
+		view.Confirmations = []domain.CommissioningConfirmation{}
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+func (s *Server) confirmDevice(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.ConfirmDeviceCommissioningRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.ConfirmDeviceCommissioning(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) deviceConfirmations(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.DeviceConfirmations(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	if view.Confirmations == nil {
+		view.Confirmations = []domain.CommissioningConfirmation{}
+	}
+	writeJSON(writer, http.StatusOK, view)
 }
 
 func (s *Server) openCase(writer http.ResponseWriter, request *http.Request) {

@@ -9,8 +9,12 @@ import (
 type DeviceStatus string
 
 const (
-	DeviceActive  DeviceStatus = "active"
-	DeviceRetired DeviceStatus = "retired"
+	// DevicePendingCommissioning devices are registered but have not passed the
+	// site confirmation of install location, foundation state, and owner. They
+	// cannot open verification cases.
+	DevicePendingCommissioning DeviceStatus = "pending_commissioning"
+	DeviceActive               DeviceStatus = "active"
+	DeviceRetired              DeviceStatus = "retired"
 )
 
 type Device struct {
@@ -21,7 +25,10 @@ type Device struct {
 	Steward    string       `json:"steward"`
 	Status     DeviceStatus `json:"status"`
 	EnrolledAt time.Time    `json:"enrolled_at"`
-	RetiredAt  *time.Time   `json:"retired_at,omitempty"`
+	// CommissionedAt is set exactly once, when the first successful commissioning
+	// confirmation moves the device into active service.
+	CommissionedAt *time.Time `json:"commissioned_at,omitempty"`
+	RetiredAt      *time.Time `json:"retired_at,omitempty"`
 }
 
 func NewDevice(id, assetTag, model, room, steward string, at time.Time) (Device, error) {
@@ -31,7 +38,7 @@ func NewDevice(id, assetTag, model, room, steward string, at time.Time) (Device,
 		Model:      strings.TrimSpace(model),
 		Room:       strings.TrimSpace(room),
 		Steward:    strings.TrimSpace(steward),
-		Status:     DeviceActive,
+		Status:     DevicePendingCommissioning,
 		EnrolledAt: at.UTC(),
 	}
 	if err := device.Validate(); err != nil {
@@ -55,15 +62,38 @@ func (d Device) Validate() error {
 		return fmt.Errorf("%w: enrollment time is required", ErrInvalidInput)
 	}
 	switch d.Status {
-	case DeviceActive, DeviceRetired:
+	case DevicePendingCommissioning, DeviceActive, DeviceRetired:
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported device state %q", ErrInvalidInput, d.Status)
 	}
 }
 
+// IsActive reports whether the device is in service and may open cases.
 func (d Device) IsActive() bool {
 	return d.Status == DeviceActive
+}
+
+// IsCommissioned reports whether the device has ever passed commissioning.
+// Retired devices remain commissioned; the lifecycle fact is not erased.
+func (d Device) IsCommissioned() bool {
+	return d.Status == DeviceActive || d.Status == DeviceRetired
+}
+
+// Commission applies the only successful commissioning confirmation. It moves a
+// pending device to active service and stamps the commissioning time exactly
+// once. A repeat confirmation cannot rewrite device facts.
+func (d *Device) Commission(at time.Time) error {
+	if d.Status == DeviceActive || d.Status == DeviceRetired {
+		return fmt.Errorf("%w: device %s is already commissioned", ErrDeviceAlreadyCommissioned, d.ID)
+	}
+	if d.Status != DevicePendingCommissioning {
+		return fmt.Errorf("%w: device %s is %s and cannot be commissioned", ErrStateConflict, d.ID, d.Status)
+	}
+	stamp := at.UTC()
+	d.Status = DeviceActive
+	d.CommissionedAt = &stamp
+	return nil
 }
 
 func (d *Device) Retire(at time.Time) error {
