@@ -9,19 +9,21 @@ import (
 type DeviceStatus string
 
 const (
-	DeviceActive  DeviceStatus = "active"
-	DeviceRetired DeviceStatus = "retired"
+	DevicePendingCommissioning DeviceStatus = "pending_commissioning"
+	DeviceActive               DeviceStatus = "active"
+	DeviceRetired              DeviceStatus = "retired"
 )
 
 type Device struct {
-	ID         string       `json:"id"`
-	AssetTag   string       `json:"asset_tag"`
-	Model      string       `json:"model"`
-	Room       string       `json:"room"`
-	Steward    string       `json:"steward"`
-	Status     DeviceStatus `json:"status"`
-	EnrolledAt time.Time    `json:"enrolled_at"`
-	RetiredAt  *time.Time   `json:"retired_at,omitempty"`
+	ID             string       `json:"id"`
+	AssetTag       string       `json:"asset_tag"`
+	Model          string       `json:"model"`
+	Room           string       `json:"room"`
+	Steward        string       `json:"steward"`
+	Status         DeviceStatus `json:"status"`
+	EnrolledAt     time.Time    `json:"enrolled_at"`
+	CommissionedAt *time.Time   `json:"commissioned_at,omitempty"`
+	RetiredAt      *time.Time   `json:"retired_at,omitempty"`
 }
 
 func NewDevice(id, assetTag, model, room, steward string, at time.Time) (Device, error) {
@@ -31,7 +33,7 @@ func NewDevice(id, assetTag, model, room, steward string, at time.Time) (Device,
 		Model:      strings.TrimSpace(model),
 		Room:       strings.TrimSpace(room),
 		Steward:    strings.TrimSpace(steward),
-		Status:     DeviceActive,
+		Status:     DevicePendingCommissioning,
 		EnrolledAt: at.UTC(),
 	}
 	if err := device.Validate(); err != nil {
@@ -55,7 +57,7 @@ func (d Device) Validate() error {
 		return fmt.Errorf("%w: enrollment time is required", ErrInvalidInput)
 	}
 	switch d.Status {
-	case DeviceActive, DeviceRetired:
+	case DevicePendingCommissioning, DeviceActive, DeviceRetired:
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported device state %q", ErrInvalidInput, d.Status)
@@ -64,6 +66,23 @@ func (d Device) Validate() error {
 
 func (d Device) IsActive() bool {
 	return d.Status == DeviceActive
+}
+
+func (d Device) IsCommissioned() bool {
+	return d.Status == DeviceActive || d.Status == DeviceRetired
+}
+
+// Commission moves a device that passed its on-site commissioning confirmation
+// into the active state. The recorded facts of a pending device are not touched
+// by failed confirmations and only this guarded transition can enable it.
+func (d *Device) Commission(at time.Time) error {
+	if d.Status != DevicePendingCommissioning {
+		return fmt.Errorf("%w: only a pending device can be commissioned", ErrStateConflict)
+	}
+	stamp := at.UTC()
+	d.Status = DeviceActive
+	d.CommissionedAt = &stamp
+	return nil
 }
 
 func (d *Device) Retire(at time.Time) error {

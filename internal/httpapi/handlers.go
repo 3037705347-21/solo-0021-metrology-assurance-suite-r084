@@ -33,6 +33,29 @@ func (s *Server) device(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, contracts.DeviceResponse{Device: device})
 }
 
+func (s *Server) commissionDevice(writer http.ResponseWriter, request *http.Request) {
+	input, err := decodeJSON[contracts.CommissionDeviceRequest](writer, request)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	view, err := s.service.CommissionDevice(request.Context(), request.PathValue("id"), input)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, view)
+}
+
+func (s *Server) commissioningHistory(writer http.ResponseWriter, request *http.Request) {
+	view, err := s.service.CommissioningHistory(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
 func (s *Server) openCase(writer http.ResponseWriter, request *http.Request) {
 	input, err := decodeJSON[contracts.OpenCaseRequest](writer, request)
 	if err != nil {

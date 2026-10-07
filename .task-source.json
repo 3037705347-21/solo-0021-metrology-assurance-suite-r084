@@ -10,8 +10,12 @@
       ],
       "invariants": [
         "asset tag is unique after trim and upper-casing",
+        "a new device is pending_commissioning and cannot open a case",
+        "only an accepted commissioning confirmation enables a device",
+        "rejected or repeated confirmations do not rewrite device facts",
+        "commissioning confirmations stay traceable after the device is enabled",
         "retired is terminal",
-        "an active device can have at most one unfinished case"
+        "a commissioned device can have at most one unfinished case"
       ]
     },
     {
@@ -58,13 +62,17 @@
     {
       "subject": "device",
       "states": [
+        "pending_commissioning",
         "active",
         "retired"
       ],
       "transitions": [
+        "pending_commissioning->active",
         "active->retired"
       ],
       "invariants": [
+        "pending devices cannot open new cases",
+        "rejected confirmations keep the device pending",
         "retired devices cannot open new cases"
       ]
     },
@@ -169,6 +177,11 @@
       "workflow_id": "register-device",
       "description": "Asset tags can be treated as case-sensitive labels or globally normalized identities; only the normalized interpretation prevents duplicate devices",
       "observable_failure": "two devices appear with tags that differ only by case or surrounding whitespace"
+    },
+    {
+      "workflow_id": "commission-device",
+      "description": "Commissioning can be treated as a mutable device edit or as an append-only fact stream; only an immutable confirmation with a guarded pending->active transition preserves both traceability and the single lifecycle fact",
+      "observable_failure": "a rejected or repeated confirmation changes the device, history disappears after enablement, or an uncommissioned device opens a case"
     },
     {
       "workflow_id": "open-verification-case",

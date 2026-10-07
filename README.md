@@ -1,9 +1,10 @@
 # Metrology Assurance Suite
 
 Metrology Assurance Suite is a Go HTTP service for bounded laboratory
-measurement assurance work. It registers devices, opens verification cases,
-records measurements, handles failed tolerance decisions, and seals traceable
-evidence records.
+measurement assurance work. It registers devices, confirms on-site
+commissioning before a device can enter formal verification, opens verification
+cases, records measurements, handles failed tolerance decisions, and seals
+traceable evidence records.
 
 ## Run
 
@@ -18,6 +19,7 @@ The service listens on `127.0.0.1:18121` by default.
 ```bash
 go build ./...
 go run ./cmd/workflowcheck --workflow register-device
+go run ./cmd/workflowcheck --workflow commission-device
 go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
@@ -36,12 +38,22 @@ or extend these smoke checks with red/green verification tests.
 - `GET /healthz`
 - `POST /devices`
 - `GET /devices/{id}`
+- `POST /devices/{id}/commissioning`
+- `GET /devices/{id}/commissioning`
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`
 - `POST /cases/{id}/reopen`
 - `POST /cases/{id}/seal`
 - `GET /cases/{id}/events`
+
+New devices are registered as `pending_commissioning`. A responsible party
+submits the installed location, foundation status, responsible person,
+evidence, and outcome to `POST /devices/{id}/commissioning`. Rejected
+confirmations are retained as history without changing the device; only an
+accepted confirmation moves the device to `active`, and only commissioned
+devices can open cases. Confirmations on an already enabled device are
+rejected as conflicts and write nothing.
 
 ## Layout
 

@@ -16,6 +16,10 @@
       "command": "go run ./cmd/workflowcheck --workflow register-device"
     },
     {
+      "workflow_id": "commission-device",
+      "command": "go run ./cmd/workflowcheck --workflow commission-device"
+    },
+    {
       "workflow_id": "open-verification-case",
       "command": "go run ./cmd/workflowcheck --workflow open-verification-case"
     },

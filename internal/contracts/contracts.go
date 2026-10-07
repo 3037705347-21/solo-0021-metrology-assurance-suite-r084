@@ -9,6 +9,14 @@ type RegisterDeviceRequest struct {
 	Steward  string `json:"steward"`
 }
 
+type CommissionDeviceRequest struct {
+	Responsible   string `json:"responsible"`
+	InstalledRoom string `json:"installed_room"`
+	Foundation    string `json:"foundation"`
+	Evidence      string `json:"evidence"`
+	Outcome       string `json:"outcome"`
+}
+
 type OpenCaseRequest struct {
 	DeviceID  string  `json:"device_id"`
 	Nominal   float64 `json:"nominal"`
@@ -35,8 +43,15 @@ type DeviceResponse struct {
 	Device domain.Device `json:"device"`
 }
 
+type CommissioningResponse struct {
+	Device        domain.Device                      `json:"device"`
+	Confirmations []domain.CommissioningConfirmation `json:"confirmations"`
+	Events        []domain.AuditEvent                `json:"events"`
+}
+
 type CaseResponse struct {
 	Case         domain.VerificationCase `json:"case"`
+	Device       domain.Device           `json:"device"`
 	Measurements []domain.Measurement    `json:"measurements"`
 	Seal         *domain.EvidenceSeal    `json:"seal,omitempty"`
 	Events       []domain.AuditEvent     `json:"events"`

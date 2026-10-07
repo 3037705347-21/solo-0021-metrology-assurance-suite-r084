@@ -9,31 +9,34 @@ import (
 )
 
 type Repository struct {
-	mu           sync.RWMutex
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
-	counters     map[string]int
+	mu             sync.RWMutex
+	devices        map[string]domain.Device
+	commissionings map[string][]domain.CommissioningConfirmation
+	cases          map[string]domain.VerificationCase
+	measurements   map[string][]domain.Measurement
+	seals          map[string]domain.EvidenceSeal
+	events         []domain.AuditEvent
+	counters       map[string]int
 }
 
 func New() *Repository {
 	return &Repository{
-		devices:      make(map[string]domain.Device),
-		cases:        make(map[string]domain.VerificationCase),
-		measurements: make(map[string][]domain.Measurement),
-		seals:        make(map[string]domain.EvidenceSeal),
-		counters:     make(map[string]int),
+		devices:        make(map[string]domain.Device),
+		commissionings: make(map[string][]domain.CommissioningConfirmation),
+		cases:          make(map[string]domain.VerificationCase),
+		measurements:   make(map[string][]domain.Measurement),
+		seals:          make(map[string]domain.EvidenceSeal),
+		counters:       make(map[string]int),
 	}
 }
 
 type Snapshot struct {
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
+	devices        map[string]domain.Device
+	commissionings map[string][]domain.CommissioningConfirmation
+	cases          map[string]domain.VerificationCase
+	measurements   map[string][]domain.Measurement
+	seals          map[string]domain.EvidenceSeal
+	events         []domain.AuditEvent
 }
 
 func (s Snapshot) Device(id string) (domain.Device, bool) {
@@ -48,6 +51,20 @@ func (s Snapshot) DeviceByTag(tag string) (domain.Device, bool) {
 		}
 	}
 	return domain.Device{}, false
+}
+
+func (s Snapshot) Commissionings(deviceID string) []domain.CommissioningConfirmation {
+	return append([]domain.CommissioningConfirmation(nil), s.commissionings[deviceID]...)
+}
+
+func (s Snapshot) DeviceEvents(deviceID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range s.events {
+		if item.SubjectType == "device" && item.SubjectID == deviceID {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (s Snapshot) Case(id string) (domain.VerificationCase, bool) {
@@ -91,12 +108,13 @@ func (s Snapshot) AllCases() []domain.VerificationCase {
 }
 
 type Mutation struct {
-	devices      map[string]domain.Device
-	cases        map[string]domain.VerificationCase
-	measurements map[string][]domain.Measurement
-	seals        map[string]domain.EvidenceSeal
-	events       []domain.AuditEvent
-	counters     map[string]int
+	devices        map[string]domain.Device
+	commissionings map[string][]domain.CommissioningConfirmation
+	cases          map[string]domain.VerificationCase
+	measurements   map[string][]domain.Measurement
+	seals          map[string]domain.EvidenceSeal
+	events         []domain.AuditEvent
+	counters       map[string]int
 }
 
 func (m *Mutation) NextID(prefix string) string {
@@ -132,6 +150,28 @@ func (m *Mutation) UpdateDevice(item domain.Device) error {
 	}
 	m.devices[item.ID] = item
 	return nil
+}
+
+func (m *Mutation) AppendCommissioning(item domain.CommissioningConfirmation) error {
+	if _, exists := m.devices[item.DeviceID]; !exists {
+		return fmt.Errorf("%w: device %s", domain.ErrNotFound, item.DeviceID)
+	}
+	m.commissionings[item.DeviceID] = append(m.commissionings[item.DeviceID], item)
+	return nil
+}
+
+func (m *Mutation) Commissionings(deviceID string) []domain.CommissioningConfirmation {
+	return append([]domain.CommissioningConfirmation(nil), m.commissionings[deviceID]...)
+}
+
+func (m *Mutation) DeviceEvents(deviceID string) []domain.AuditEvent {
+	var result []domain.AuditEvent
+	for _, item := range m.events {
+		if item.SubjectType == "device" && item.SubjectID == deviceID {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (m *Mutation) Case(id string) (domain.VerificationCase, bool) {
@@ -220,17 +260,19 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 	defer r.mu.Unlock()
 
 	next := &Mutation{
-		devices:      cloneDevices(r.devices),
-		cases:        cloneCases(r.cases),
-		measurements: cloneMeasurements(r.measurements),
-		seals:        cloneSeals(r.seals),
-		events:       append([]domain.AuditEvent(nil), r.events...),
-		counters:     cloneCounters(r.counters),
+		devices:        cloneDevices(r.devices),
+		commissionings: cloneCommissionings(r.commissionings),
+		cases:          cloneCases(r.cases),
+		measurements:   cloneMeasurements(r.measurements),
+		seals:          cloneSeals(r.seals),
+		events:         append([]domain.AuditEvent(nil), r.events...),
+		counters:       cloneCounters(r.counters),
 	}
 	if err := fn(next); err != nil {
 		return err
 	}
 	r.devices = next.devices
+	r.commissionings = next.commissionings
 	r.cases = next.cases
 	r.measurements = next.measurements
 	r.seals = next.seals
@@ -241,11 +283,12 @@ func (r *Repository) Mutate(ctx context.Context, fn func(*Mutation) error) error
 
 func (r *Repository) snapshot() Snapshot {
 	return Snapshot{
-		devices:      cloneDevices(r.devices),
-		cases:        cloneCases(r.cases),
-		measurements: cloneMeasurements(r.measurements),
-		seals:        cloneSeals(r.seals),
-		events:       append([]domain.AuditEvent(nil), r.events...),
+		devices:        cloneDevices(r.devices),
+		commissionings: cloneCommissionings(r.commissionings),
+		cases:          cloneCases(r.cases),
+		measurements:   cloneMeasurements(r.measurements),
+		seals:          cloneSeals(r.seals),
+		events:         append([]domain.AuditEvent(nil), r.events...),
 	}
 }
 
@@ -253,6 +296,14 @@ func cloneDevices(values map[string]domain.Device) map[string]domain.Device {
 	result := make(map[string]domain.Device, len(values))
 	for key, value := range values {
 		result[key] = value
+	}
+	return result
+}
+
+func cloneCommissionings(values map[string][]domain.CommissioningConfirmation) map[string][]domain.CommissioningConfirmation {
+	result := make(map[string][]domain.CommissioningConfirmation, len(values))
+	for key, value := range values {
+		result[key] = append([]domain.CommissioningConfirmation(nil), value...)
 	}
 	return result
 }

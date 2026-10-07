@@ -53,11 +53,34 @@
       "steps": [
         "decode and validate the device request",
         "normalize the asset tag and reject a duplicate identity",
-        "commit the active device and its audit event"
+        "commit the pending device and its audit event"
       ],
-      "success": "returns the registered device and a readable snapshot",
+      "success": "returns the registered device in pending_commissioning and a readable snapshot",
       "failure": "returns stable validation or duplicate asset-tag errors",
       "verification": "workflowcheck registers a device, reads it, and rejects a duplicate tag",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
+    },
+    {
+      "id": "commission-device",
+      "name": "Confirm device commissioning",
+      "entry": "POST /devices/{id}/commissioning",
+      "steps": [
+        "load the pending device and reject confirmations on non-pending devices",
+        "record the responsible party, installed location, foundation status, and evidence",
+        "append the immutable confirmation and audit event atomically",
+        "move the device to active only for an accepted outcome"
+      ],
+      "success": "returns the device with its full confirmation history; an accepted confirmation enables the device",
+      "failure": "returns not-found, invalid-input, or state-conflict errors without rewriting device facts",
+      "verification": "workflowcheck blocks a pending case, retains a rejected confirmation without changing the device, accepts once, rejects a repeated confirmation, races concurrent acceptances, and reads the history",
       "module_ids": [
         "runtimecheck",
         "httpapi",
@@ -73,12 +96,12 @@
       "name": "Open verification case",
       "entry": "POST /cases",
       "steps": [
-        "verify the device exists and is active",
+        "verify the device exists, is commissioned, and is active",
         "reject a second unfinished case for the same device",
         "open one waiting case with a nominal value and tolerance"
       ],
-      "success": "returns an awaiting_measurement case",
-      "failure": "returns not-found or active-case conflict errors",
+      "success": "returns an awaiting_measurement case carrying the same device lifecycle fact",
+      "failure": "returns not-found, device-not-commissioned, or active-case conflict errors",
       "verification": "workflowcheck opens and reads a case, then rejects a concurrent second case",
       "module_ids": [
         "runtimecheck",
